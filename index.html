@@ -1737,7 +1737,16 @@ async function gasPost(payload){
   const url=gScriptUrl();
   if(!url){toast('Paste your Apps Script URL in ⚙ Settings first.','error');return null;}
   try{
-    const res=await fetch(url,{method:'POST',body:JSON.stringify(payload),headers:{'Content-Type':'text/plain'}});
+    const encoded=encodeURIComponent(JSON.stringify(payload));
+    const getUrl=url+'?data='+encoded;
+    // Use GET for normal requests (avoids CORS preflight)
+    // Fall back to POST only for large file uploads
+    let res;
+    if(getUrl.length>7500){
+      res=await fetch(url,{method:'POST',body:JSON.stringify(payload),headers:{'Content-Type':'text/plain'}});
+    } else {
+      res=await fetch(getUrl);
+    }
     const json=await res.json();
     return json;
   }catch(err){
