@@ -3336,7 +3336,7 @@ function renderReceiptsList(){
 // ═══════════════════════════════
 // AUTO CLOUD SYNC
 // ═══════════════════════════════
-let _cloudSyncTimer=null;
+let _cloudSyncTimers={}; // one debounce timer PER KEY — a shared timer made saveBillingAndLTP cancel the billing push when ltpay saved right after
 
 function setCloudStatus(msg,color){
   const el=document.getElementById('sync-indicator');
@@ -3363,9 +3363,9 @@ async function runCloudSync(key){
 function scheduleCloudSync(key){
   if(!gScriptUrl())return;
   if(!SHARE_KEYS.includes(key))return;
-  clearTimeout(_cloudSyncTimer);
+  clearTimeout(_cloudSyncTimers[key]);
   setCloudStatus('⏳ saving...','#f9e79f');
-  _cloudSyncTimer=setTimeout(()=>runCloudSync(key),3000);
+  _cloudSyncTimers[key]=setTimeout(()=>runCloudSync(key),3000);
 }
 
 // Wrap DB.set to trigger auto-sync on every data change
