@@ -670,7 +670,7 @@ table.stmt-t-aging td{border:1px solid #000;padding:3px 6px;text-align:center;wi
               <th>Owner Rent<br/><small style="font-weight:400;font-size:.68rem">agent pays us</small></th>
               <th style="color:var(--green)">Agent's Fee</th>
               <th>LTP Status</th><th>Date Paid</th><th>Bank Slip</th><th>Remarks</th>
-              <th style="text-align:right;color:var(--blue)">Total Received<br/><small style="font-weight:400;font-size:.68rem">owner+elec+water (paid only)</small></th>
+              <th style="text-align:right;color:var(--blue)">Total Received<br/><small style="font-weight:400;font-size:.68rem">owner+elec+water+other (paid only)</small></th>
             </tr></thead>
             <tbody id="ms-body"></tbody>
             <tfoot><tr>
@@ -1334,8 +1334,8 @@ function renderCombinedRows(units,m){
     const ownerRent=+(ld.ownerRent||u.ownerRent||0);
     const tenRent=+u.rent||0;
     const comm=tenRent-ownerRent;
-    const elec=+b.ea||0, water=+b.wa||0;
-    const ltpTotal=ownerRent+elec+water;
+    const elec=+b.ea||0, water=+b.wa||0, other=+b.oa||0;
+    const ltpTotal=ownerRent+elec+water+other;
     const status=ld.status||'pending';
     // Bank slip cell — multi-file
     const sv=gLTP(m)[u.id]||{};
@@ -1387,9 +1387,9 @@ function updBilling(){
     const ld=ltpData[u.id]||{};
     const t=rowTot(u,b);
     const own=parseFloat(document.getElementById('ltp-owner-'+u.id)?.value)||+ld.ownerRent||0;
-    const ea=+b.ea||0,wa=+b.wa||0;
+    const ea=+b.ea||0,wa=+b.wa||0,oa=+b.oa||0;
     const comm=(+u.rent||0)-own;
-    const ltpTotal=own+ea+wa;
+    const ltpTotal=own+ea+wa+oa;
     tR+=(+u.rent||0);tE+=ea;tW+=wa;tO+=(+b.oa||0);tG+=t;tOwn+=own;tComm+=comm;tLTP+=ltpTotal;
     const el=document.getElementById('brow-'+u.id);if(el)el.textContent='RM '+t.toFixed(2);
     const ce=document.getElementById('ltp-comm-'+u.id);if(ce)ce.textContent=(comm>=0?'':'-')+'RM '+Math.abs(comm).toFixed(2);
@@ -2673,6 +2673,7 @@ async function downloadLTPayPDF(){
   saveLTPay();
   const units=gUnits().filter(u=>u.status==='active'&&isUnitActiveInMonth(u,m));
   const saved=gLTP(m);
+  const bills=gBilling(m);
   const co=gSettings();
   const cur=co.cur||'RM';
 
@@ -2683,7 +2684,8 @@ async function downloadLTPayPDF(){
     const owner=+sv.ownerRent||0;
     const elec=+sv.elec||0;
     const water=+sv.water||0;
-    const total=owner+elec+water;
+    const other=+((bills[u.id]||{}).oa)||0;
+    const total=owner+elec+water+other;
     const comm=tenant-owner;
     tTenant+=tenant;tOwner+=owner;tElec+=elec;tWater+=water;tTotal+=total;tComm+=comm;
     const statusIcon=sv.status==='paid'?'✅':sv.status==='partial'?'🔶':'⏳';
@@ -2757,15 +2759,17 @@ async function syncLTPayToSheets(){
   saveLTPay();
   const units=gUnits().filter(u=>u.status==='active'&&isUnitActiveInMonth(u,m));
   const saved=gLTP(m);
+  const billsLTP=gBilling(m);
   const rows=units.map(u=>{
     const sv=saved[u.id]||{};
+    const otherAmt=+((billsLTP[u.id]||{}).oa)||0;
     return{
       month:m,unit:u.no,building:u.bld,tenant:u.ten,
       tenantRent:+u.rent||0,
       ownerRent:+sv.ownerRent||0,
       commission:(+u.rent||0)-(+sv.ownerRent||0),
       elec:+sv.elec||0,water:+sv.water||0,
-      total:(+sv.ownerRent||0)+(+sv.elec||0)+(+sv.water||0),
+      total:(+sv.ownerRent||0)+(+sv.elec||0)+(+sv.water||0)+otherAmt,
       status:sv.status||'pending',datePaid:sv.datePaid||''
     };
   });
@@ -2814,7 +2818,8 @@ function renderMthSummary(){
     const status=sv.status||'pending';
     const elec=+b.ea||0;
     const water=+b.wa||0;
-    const totalReceived=status==='paid'?(ownerRent+elec+water):null;
+    const other=+b.oa||0;
+    const totalReceived=status==='paid'?(ownerRent+elec+water+other):null;
     return{u,b,sv,invoiceTotal,ownerRent,comm,status,elec,water,totalReceived};
   });
 
@@ -2847,7 +2852,7 @@ function renderMthSummary(){
     <th style="${thStyle}" onclick="msSortBy('date')">Date Paid${si('date')}</th>
     <th>Bank Slip</th>
     <th>Remarks</th>
-    <th style="text-align:right;color:var(--blue)">Total Received<br/><small style="font-weight:400;font-size:.68rem">owner+elec+water (paid only)</small></th>
+    <th style="text-align:right;color:var(--blue)">Total Received<br/><small style="font-weight:400;font-size:.68rem">owner+elec+water+other (paid only)</small></th>
   </tr>`;
 
   let totalInvoice=0,totalOwner=0,totalComm=0,totalReceived=0,paidCount=0;
@@ -2914,11 +2919,11 @@ async function downloadMthSummaryPDF(){
     const invoiceTotal=rowTot(u,b);
     const ownerRent=+sv.ownerRent||+u.ownerRent||0;
     const comm=(+u.rent||0)-ownerRent;
-    const elec=+b.ea||0;const water=+b.wa||0;
+    const elec=+b.ea||0;const water=+b.wa||0;const other=+b.oa||0;
     const isPaid=sv.status==='paid';
-    const totalRec=isPaid?(ownerRent+elec+water):null;
+    const totalRec=isPaid?(ownerRent+elec+water+other):null;
     tInv+=invoiceTotal;tOwner+=ownerRent;tComm+=comm;
-    if(isPaid)tReceived+=ownerRent+elec+water;
+    if(isPaid)tReceived+=ownerRent+elec+water+other;
     const statusLabel=sv.status==='paid'?'✅ Paid':sv.status==='partial'?'🔶 Partial':'⏳ Pending';
     const slipFiles3=sv.slipFiles||(sv.slipDriveUrl?[{name:sv.slipName||'View',driveUrl:sv.slipDriveUrl}]:[]);
     const slipLink=slipFiles3.length?slipFiles3.map(f=>f.driveUrl?`<a href="${f.driveUrl}" target="_blank">📎 ${esc(f.name||'View')}</a>`:`<span style="color:var(--orange)">⚠ ${esc(f.name||'slip')} not uploaded</span>`).join(' '):'—';
@@ -2968,7 +2973,7 @@ async function downloadMthSummaryPDF(){
       <th>Unit</th><th>Tenant</th><th>Rent</th><th>Elec</th><th>Water</th><th>Other</th>
       <th>Invoice Total</th><th>Owner Rent</th><th>Agent's Fee</th>
       <th>LTP Status</th><th>Date Paid</th><th>Bank Slip</th><th>Remarks</th>
-      <th style="color:#2980b9">Total Received<br/><span style="font-weight:400;font-size:9px">owner+elec+water (paid only)</span></th>
+      <th style="color:#2980b9">Total Received<br/><span style="font-weight:400;font-size:9px">owner+elec+water+other (paid only)</span></th>
     </tr></thead>
     <tbody>${rows}</tbody>
     <tfoot><tr>
