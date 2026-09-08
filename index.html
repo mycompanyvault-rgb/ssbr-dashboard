@@ -1341,9 +1341,9 @@ function saveUnit(){
       const old=units[i],oldTen=(old.ten||'').trim();
       if(oldTen&&oldTen!=='-'&&oldTen.toLowerCase()!==ten.toLowerCase()&&old.rentstart){
         const hist=gTenancy();
-        const dup=hist.some(h=>h.unitId===editUid&&h.tenant===oldTen&&h.start===old.rentstart);
+        const dup=hist.some(h=>(h.unitId===editUid||thKey(h.unitNo)===thKey(old.no))&&h.tenant===oldTen&&h.start===old.rentstart);
         if(!dup){
-          hist.push({id:uid(),unitId:editUid,tenant:oldTen,start:old.rentstart,
+          hist.push({id:uid(),unitId:editUid,unitNo:old.no,tenant:oldTen,start:old.rentstart,
             end:old.rentend||v('u-rentstart')||'',rent:+old.rent||0,ownerRent:+old.ownerRent||0,
             note:'Auto-archived when tenant changed'});
           DB.set('tenancy',hist);archived=true;
@@ -1366,6 +1366,7 @@ const TH_COLORS=['#2980b9','#27ae60','#8e44ad','#e67e22','#16a085','#c0392b','#2
 const TH_MONS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 let thEditId='';
 
+const thKey=no=>(no||'').trim().toUpperCase();
 const thParse=s=>{if(!s)return null;const d=new Date(s+'T00:00:00');return isNaN(d.getTime())?null:d};
 const thFmt=s=>{const d=thParse(s);return d?String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear():'—'};
 function thDur(start,end){
@@ -1378,37 +1379,86 @@ function thDur(start,end){
   const y=Math.floor(mo/12),m=mo%12;
   return (y?y+' yr'+(y>1?'s':''):'')+(y&&m?' ':'')+(m?m+' mo':(y?'':'0 mo'));
 }
-// The CURRENT tenancy lives on the unit record itself; only PAST ones are stored
-// in the 'tenancy' key. That way the timeline can never disagree with the unit.
-function thListFor(unitId){
-  const u=gUnits().find(x=>x.id===unitId);
-  const list=gTenancy().filter(t=>t.unitId===unitId).map(t=>({...t,current:false}));
-  const tn=((u&&u.ten)||'').trim();
-  if(tn&&tn!=='-')list.push({id:'__current',unitId,tenant:tn,start:(u.rentstart||''),end:(u.rentend||''),rent:u.rent,ownerRent:u.ownerRent,note:'',current:true});
-  return list.sort((a,b)=>(a.start||'9999-99-99').localeCompare(b.start||'9999-99-99'));
+
+// A unit may exist as SEVERAL records sharing one unit number (a new record was
+// created each time the tenant changed). Everything here works on the number.
+function thGroups(){
+  const g={};
+  gUnits().forEach(u=>{const k=thKey(u.no);if(!k)return;(g[k]=g[k]||[]).push(u)});
+  return g;
+}
+const thUnitsFor=no=>thGroups()[thKey(no)]||[];
+// The record representing the unit today: a still-running tenancy, else the latest.
+function thPrimary(no){
+  const recs=thUnitsFor(no);if(!recs.length)return null;
+  const now=new Date();
+  const live=recs.filter(u=>!u.rentend||thParse(u.rentend)>=now);
+  return (live.length?live:recs).slice().sort((a,b)=>(b.rentend||'9999').localeCompare(a.rentend||'9999'))[0];
+}
+
+function thListFor(no){
+  const k=thKey(no),recs=thUnitsFor(k),ids=recs.map(u=>u.id),raw=[];
+  gTenancy().forEach(t=>{if(thKey(t.unitNo)===k||ids.includes(t.unitId))raw.push({...t,src:'history'})});
+  recs.forEach(u=>{
+    const tn=(u.ten||'').trim();
+    if(tn&&tn!=='-')raw.push({id:'__u_'+u.id,unitId:u.id,unitNo:u.no,tenant:tn,start:u.rentstart||'',
+      end:u.rentend||'',rent:+u.rent||0,ownerRent:+u.ownerRent||0,note:'',src:'unit'});
+  });
+  // chronological; an unknown start predates anything dated
+  raw.sort((a,b)=>(a.start||'0000-00-00').localeCompare(b.start||'0000-00-00'));
+  // Merge back-to-back spells by the same tenant — a unit duplicated to extend a
+  // tenancy must not read as two different tenants.
+  const out=[];
+  raw.forEach(t=>{
+    const p=out[out.length-1];
+    let join=false;
+    if(p&&p.tenant.trim().toLowerCase()===t.tenant.trim().toLowerCase()){
+      if(!p.end)join=true;
+      else{const pe=thParse(p.end),ts=thParse(t.start);join=!ts||!pe||((ts-pe)/86400000)<=40}
+    }
+    if(join){
+      // an unknown start means the spell began before anything we can date, so it wins
+      if(!t.start)p.start='';else if(p.start&&t.start<p.start)p.start=t.start;
+      if(!t.end||!p.end)p.end='';else if(t.end>p.end)p.end=t.end;
+      p.rent=Math.max(p.rent||0,t.rent||0);p.ownerRent=Math.max(p.ownerRent||0,t.ownerRent||0);
+      if(t.note&&!p.note)p.note=t.note;
+      p.parts=(p.parts||1)+1;p.ids.push(t.id);
+      if(t.src==='history')p.hasHistory=true;else p.hasUnit=true;
+    }else out.push({...t,ids:[t.id],parts:1,hasHistory:t.src==='history',hasUnit:t.src==='unit'});
+  });
+  const now=new Date();
+  out.forEach(t=>{const s=thParse(t.start),e=thParse(t.end);
+    t.future=!!(s&&s>now);
+    t.current=(!s||s<=now)&&(!e||e>=now);});
+  return out;
 }
 
 function initTenancy(){
   const sel=document.getElementById('th-unit');if(!sel)return;
   const prev=sel.value;
-  const units=gUnits().slice().sort((a,b)=>(a.no||'').localeCompare(b.no||'',undefined,{numeric:true}));
-  sel.innerHTML='<option value="">— Select a unit —</option>'+units.map(u=>`<option value="${u.id}">${esc(u.no)} — ${esc(u.bld||'')}${u.status!=='active'?' (inactive)':''}</option>`).join('');
-  if(prev&&units.some(u=>u.id===prev))sel.value=prev;
+  const groups=thGroups();
+  const keys=Object.keys(groups).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+  sel.innerHTML='<option value="">— Select a unit —</option>'+keys.map(k=>{
+    const recs=groups[k],p=thPrimary(k)||recs[0];
+    const extra=recs.length>1?' · '+recs.length+' records':'';
+    return `<option value="${esc(k)}">${esc(p.no)} — ${esc(p.bld||'')}${extra}</option>`;
+  }).join('');
+  if(prev&&groups[prev])sel.value=prev;
   renderTenancy();
 }
 
 function renderTenancy(){
-  const unitId=v('th-unit'); // note: don't shadow the global uid() helper here
+  const no=v('th-unit');
   const card=document.getElementById('th-card'),tbl=document.getElementById('th-tbl-card'),info=document.getElementById('th-info');
-  if(!unitId){card.classList.add('hidden');tbl.classList.add('hidden');info.style.display='';return}
-  const u=gUnits().find(x=>x.id===unitId);if(!u)return;
+  if(!no){card.classList.add('hidden');tbl.classList.add('hidden');info.style.display='';return}
+  const recs=thUnitsFor(no),p=thPrimary(no);
+  if(!p){card.classList.add('hidden');tbl.classList.add('hidden');info.style.display='';return}
   info.style.display='none';card.classList.remove('hidden');tbl.classList.remove('hidden');
-  const list=thListFor(unitId);
-  document.getElementById('th-title').textContent='Tenancy History — '+u.no+' ('+(u.bld||'')+')';
+  const list=thListFor(no);
+  document.getElementById('th-title').innerHTML='Tenancy History — '+esc(p.no)+' <span style="font-weight:400;color:var(--muted);font-size:.85rem">('+esc(p.bld||'')+(recs.length>1?' · combined from '+recs.length+' unit records':'')+')</span>';
 
-  // Stat cards
   const names=[...new Set(list.map(t=>t.tenant))];
-  const cur=list.find(t=>t.current&&(!t.end||thParse(t.end)>=new Date()));
+  const cur=list.find(t=>t.current);
   let longest=null;
   list.forEach(t=>{const s=thParse(t.start);if(!s)return;const e=thParse(t.end)||new Date();const d=e-s;if(!longest||d>longest.d)longest={d,t}});
   const stat=(label,val,color)=>`<div style="padding:10px 14px;border-right:1px solid var(--border)">
@@ -1417,49 +1467,58 @@ function renderTenancy(){
   document.getElementById('th-stats').innerHTML=
     stat('Tenancies',list.length,'var(--navy)')+
     stat('Different Tenants',names.length,'var(--blue)')+
-    stat('Currently',cur?'🟢 Occupied':'⚪ Vacant','var(--'+(cur?'green':'muted')+')')+
+    stat('Currently',cur?'🟢 Occupied':'⚪ Vacant',cur?'var(--green)':'var(--muted)')+
     stat('Longest Tenancy',longest?thDur(longest.t.start,longest.t.end):'—','var(--orange)');
 
   document.getElementById('th-chart').innerHTML=thChartSVG(list);
 
-  // Detail table
   const cur$=gSettings().cur||'RM';
   document.getElementById('th-body').innerHTML=list.length?list.map((t,i)=>`<tr${t.current?' style="background:#f0fff4"':''}>
       <td>${i+1}</td>
-      <td><div style="font-weight:600">${esc(t.tenant)}</div>${t.current?'<span class="badge badge-green" style="font-size:.65rem">Current — from unit record</span>':''}</td>
-      <td style="font-size:.82rem">${thFmt(t.start)}</td>
+      <td><div style="font-weight:600">${esc(t.tenant)}</div>
+        ${t.current?'<span class="badge badge-green" style="font-size:.65rem">Current</span> ':''}
+        ${t.future?'<span class="badge" style="background:#8e44ad;color:#fff;font-size:.65rem">Upcoming</span> ':''}
+        ${t.parts>1?'<span class="badge" style="background:#eee;color:#666;font-size:.62rem">merged from '+t.parts+'</span>':''}</td>
+      <td style="font-size:.82rem">${t.start?thFmt(t.start):'<span style="color:var(--orange)">not set</span>'}</td>
       <td style="font-size:.82rem">${t.end?thFmt(t.end):'<span style="color:var(--green);font-weight:600">ongoing</span>'}</td>
       <td style="font-size:.82rem">${thDur(t.start,t.end)}</td>
       <td style="font-size:.82rem">${t.rent?cur$+' '+(+t.rent).toFixed(2):'—'}</td>
       <td style="font-size:.78rem;color:var(--muted)">${esc(t.note||'')}</td>
-      <td>${t.current
-        ?'<button class="btn btn-outline btn-xs" onclick="show(\'units\')">Edit in Units</button>'
-        :`<button class="btn btn-outline btn-xs" onclick="openTenancyModal('${t.id}')">✏️</button> <button class="btn btn-danger btn-xs" onclick="delTenancyRecord('${t.id}')">🗑</button>`}</td>
+      <td>${t.hasUnit
+        ?'<button class="btn btn-outline btn-xs" onclick="show(\'units\')" title="This period comes from a unit record">Edit in Units</button>'
+        :`<button class="btn btn-outline btn-xs" onclick="openTenancyModal('${t.ids[0]}')">✏️</button> <button class="btn btn-danger btn-xs" onclick="delTenancyRecord('${t.ids[0]}')">🗑</button>`}</td>
     </tr>`).join('')
-    :'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No tenancy records. Click "+ Add Past Tenancy" to record previous tenants.</td></tr>';
+    :'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No named tenant on record for this unit. Click "+ Add Past Tenancy" to record one.</td></tr>';
 }
 
 // Horizontal timeline: one continuous occupancy strip (tenants + vacancy gaps),
-// then one labelled bar per tenancy drawn on the same time scale.
+// then one labelled bar per tenancy on the same time scale. A tenancy with no
+// recorded start is drawn running off the left edge rather than being invented.
 function thChartSVG(list){
-  const dated=list.filter(t=>thParse(t.start));
-  if(!dated.length)return '<div class="alert alert-warning">No start dates recorded yet — add dates and the timeline will appear.</div>';
+  const items=list.filter(t=>thParse(t.start)||thParse(t.end));
+  if(!items.length)return '<div class="alert alert-warning">No dates recorded yet — add a start or end date and the timeline will appear.</div>';
   const now=Date.now();
-  let t0=Math.min(...dated.map(t=>thParse(t.start).getTime()));
-  let t1=Math.max(now,...dated.map(t=>(thParse(t.end)||new Date()).getTime()));
-  let span=Math.max(t1-t0,86400000*120);
-  t0-=span*0.02;t1+=span*0.02;span=t1-t0;
+  const times=[now];
+  items.forEach(t=>{const s=thParse(t.start),e=thParse(t.end);if(s)times.push(s.getTime());if(e)times.push(e.getTime())});
+  let lo=Math.min(...times),hi=Math.max(...times);
+  if(hi-lo<86400000*120){const mid=(hi+lo)/2;lo=mid-86400000*60;hi=mid+86400000*60}
+  const openAny=items.some(t=>!thParse(t.start));
+  if(openAny)lo-=(hi-lo)*0.28; // room for bars that run off the left edge
+  const pad=(hi-lo)*0.02;
+  const t0=lo-pad,t1=hi+pad,span=t1-t0;
 
   const W=1000,padL=10,padR=10,IW=W-padL-padR;
   const X=ms=>padL+((ms-t0)/span)*IW;
+  const openStartMs=t0+span*0.028; // where an unknown-start bar begins
   const stripY=48,stripH=30,rowH=38,rowsY=stripY+stripH+28;
-  const H=rowsY+dated.length*rowH+6;
+  const H=rowsY+items.length*rowH+6;
 
-  const names=[...new Set(dated.map(t=>t.tenant))];
+  const names=[...new Set(items.map(t=>t.tenant))];
   const colorOf=n=>TH_COLORS[names.indexOf(n)%TH_COLORS.length];
   const fit=(s,px,fs)=>{const max=Math.floor(px/(fs*0.56));return s.length>max?s.slice(0,Math.max(1,max-1))+'…':s};
+  const spanOf=t=>{const s=thParse(t.start),e=thParse(t.end);
+    return{a:s?s.getTime():openStartMs,b:e?e.getTime():now,openL:!s,openR:!e}};
 
-  // Axis ticks
   const yrs=span/(365.25*86400000);
   const step=yrs>8?24:yrs>4?12:yrs>2?6:yrs>1?3:1;
   const ticks=[];const dt=new Date(t0);dt.setDate(1);
@@ -1468,19 +1527,16 @@ function thChartSVG(list){
   const tickLbl=d=>step>=12?String(d.getFullYear()):TH_MONS[d.getMonth()]+" '"+String(d.getFullYear()).slice(2);
 
   let s='';
-  // grid + axis
   ticks.forEach(d=>{const x=X(d.getTime());
     s+=`<line x1="${x.toFixed(1)}" y1="28" x2="${x.toFixed(1)}" y2="${H-4}" stroke="#e8e8e8" stroke-width="1"/>`;
     s+=`<text x="${x.toFixed(1)}" y="20" font-size="10.5" fill="#888" text-anchor="middle" font-family="Arial,sans-serif">${tickLbl(d)}</text>`;});
 
-  // occupancy strip with vacancy gaps
+  // occupancy strip
   let segs=[],maxEnd=null;
-  dated.forEach(t=>{
-    const a=thParse(t.start).getTime(),b=(thParse(t.end)||new Date()).getTime();
+  items.forEach(t=>{const{a,b}=spanOf(t);
     if(maxEnd!==null&&a-maxEnd>86400000*3)segs.push({vacant:true,s:maxEnd,e:a});
     segs.push({vacant:false,s:a,e:b,t});
-    maxEnd=maxEnd===null?b:Math.max(maxEnd,b);
-  });
+    maxEnd=maxEnd===null?b:Math.max(maxEnd,b)});
   s+=`<rect x="${padL}" y="${stripY}" width="${IW}" height="${stripH}" fill="#fafafa" stroke="#e0e0e0" rx="4"/>`;
   segs.forEach(g=>{
     const x=X(g.s),w=Math.max(2,X(g.e)-X(g.s));
@@ -1496,25 +1552,27 @@ function thChartSVG(list){
   s+=`<text x="${padL}" y="${stripY-6}" font-size="10" fill="#666" font-weight="bold" font-family="Arial,sans-serif">OCCUPANCY</text>`;
 
   // one row per tenancy
-  dated.forEach((t,i)=>{
-    const y=rowsY+i*rowH, cy=y+12;
-    const a=thParse(t.start).getTime(),b=(thParse(t.end)||new Date()).getTime();
+  items.forEach((t,i)=>{
+    const y=rowsY+i*rowH;
+    const{a,b,openL,openR}=spanOf(t);
     const x=X(a),w=Math.max(3,X(b)-X(a)),c=colorOf(t.tenant);
-    s+=`<line x1="${padL}" y1="${cy+10}" x2="${W-padR}" y2="${cy+10}" stroke="#f0f0f0" stroke-width="1"/>`;
+    s+=`<line x1="${padL}" y1="${y+22}" x2="${W-padR}" y2="${y+22}" stroke="#f0f0f0" stroke-width="1"/>`;
     s+=`<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="21" rx="4" fill="${c}" opacity=".9"/>`;
-    if(!t.end)s+=`<polygon points="${(x+w).toFixed(1)},${y} ${(x+w+7).toFixed(1)},${(y+10.5).toFixed(1)} ${(x+w).toFixed(1)},${y+21}" fill="${c}" opacity=".9"/>`;
+    if(openR)s+=`<polygon points="${(x+w).toFixed(1)},${y} ${(x+w+7).toFixed(1)},${(y+10.5).toFixed(1)} ${(x+w).toFixed(1)},${y+21}" fill="${c}" opacity=".9"/>`;
+    if(openL)s+=`<polygon points="${x.toFixed(1)},${y} ${(x-7).toFixed(1)},${(y+10.5).toFixed(1)} ${x.toFixed(1)},${y+21}" fill="${c}" opacity=".55"/>`;
     const label=t.tenant+(t.current?'  ●':'');
     if(w>105){s+=`<text x="${(x+7).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#fff" font-weight="bold" font-family="Arial,sans-serif">${esc(fit(label,w-14,10.5))}</text>`}
     else{
-      const right=x+w+(t.end?6:13);
+      const right=x+w+(openR?13:6);
       const useLeft=right+label.length*6>W-padR;
-      s+=`<text x="${(useLeft?x-6:right).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#333" font-weight="bold" text-anchor="${useLeft?'end':'start'}" font-family="Arial,sans-serif">${esc(label)}</text>`;
+      s+=`<text x="${(useLeft?x-(openL?13:6):right).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#333" font-weight="bold" text-anchor="${useLeft?'end':'start'}" font-family="Arial,sans-serif">${esc(label)}</text>`;
     }
-    const sub=thFmt(t.start)+' → '+(t.end?thFmt(t.end):'ongoing')+'  ·  '+thDur(t.start,t.end);
+    const from=t.start?thFmt(t.start):'start not recorded';
+    const dur=thDur(t.start,t.end);
+    const sub=from+' → '+(t.end?thFmt(t.end):'ongoing')+(dur!=='—'?'  ·  '+dur:'')+(t.parts>1?'  ·  merged from '+t.parts+' records':'');
     s+=`<text x="${padL}" y="${y+32}" font-size="9.5" fill="#999" font-family="Arial,sans-serif">${esc(sub)}</text>`;
   });
 
-  // today marker
   if(now>=t0&&now<=t1){const x=X(now);
     s+=`<line x1="${x.toFixed(1)}" y1="28" x2="${x.toFixed(1)}" y2="${H-4}" stroke="#e74c3c" stroke-width="1.4" stroke-dasharray="4,3"/>`;
     s+=`<text x="${x.toFixed(1)}" y="${H-0.5}" font-size="9.5" fill="#e74c3c" text-anchor="middle" font-weight="bold" font-family="Arial,sans-serif">today</text>`;}
@@ -1528,12 +1586,16 @@ function thChartSVG(list){
 function openTenancyModal(id){
   thEditId=id||'';
   const usel=document.getElementById('thm-unit');
-  const units=gUnits().slice().sort((a,b)=>(a.no||'').localeCompare(b.no||'',undefined,{numeric:true}));
-  usel.innerHTML=units.map(u=>`<option value="${u.id}">${esc(u.no)} — ${esc(u.bld||'')}</option>`).join('');
+  const groups=thGroups();
+  const keys=Object.keys(groups).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+  usel.innerHTML=keys.map(k=>{const p=thPrimary(k)||groups[k][0];
+    return `<option value="${esc(k)}">${esc(p.no)} — ${esc(p.bld||'')}</option>`}).join('');
   document.getElementById('thm-tenant-list').innerHTML=(DB.get('tenants')||[]).map(t=>`<option value="${esc(t.name||'')}"></option>`).join('');
   const rec=id?gTenancy().find(t=>t.id===id):null;
   document.getElementById('thm-title').textContent=rec?'Edit Tenancy':'Add Past Tenancy';
-  usel.value=rec?rec.unitId:(v('th-unit')||(units[0]||{}).id||'');
+  let preset=v('th-unit')||keys[0]||'';
+  if(rec)preset=thKey(rec.unitNo)||thKey((gUnits().find(u=>u.id===rec.unitId)||{}).no)||preset;
+  usel.value=preset;
   document.getElementById('thm-tenant').value=rec?rec.tenant||'':'';
   document.getElementById('thm-start').value=rec?rec.start||'':'';
   document.getElementById('thm-end').value=rec?rec.end||'':'';
@@ -1544,16 +1606,17 @@ function openTenancyModal(id){
 }
 
 function saveTenancyRecord(){
-  const unitId=v('thm-unit'),tenant=v('thm-tenant').trim(),start=v('thm-start'),end=v('thm-end');
-  if(!unitId||!tenant||!start){toast('Unit, tenant name and start date are required.','error');return}
+  const unitNo=v('thm-unit'),tenant=v('thm-tenant').trim(),start=v('thm-start'),end=v('thm-end');
+  if(!unitNo||!tenant||!start){toast('Unit, tenant name and start date are required.','error');return}
   if(end&&end<start){toast('End date cannot be before the start date.','error');return}
+  const p=thPrimary(unitNo);
   const list=gTenancy();
-  const data={unitId,tenant,start,end,rent:+v('thm-rent')||0,ownerRent:+v('thm-ownerrent')||0,note:v('thm-note').trim()};
+  const data={unitNo,unitId:p?p.id:'',tenant,start,end,rent:+v('thm-rent')||0,ownerRent:+v('thm-ownerrent')||0,note:v('thm-note').trim()};
   if(thEditId){const i=list.findIndex(t=>t.id===thEditId);if(i>-1)list[i]={...list[i],...data}}
   else list.push({id:uid(),...data});
   DB.set('tenancy',list);
   closeModal('tenancy-modal');
-  const sel=document.getElementById('th-unit');if(sel&&!sel.value)sel.value=unitId;
+  const sel=document.getElementById('th-unit');if(sel&&!sel.value)sel.value=thKey(unitNo);
   renderTenancy();
   toast(thEditId?'Tenancy updated!':'Tenancy added!','success');
 }
@@ -1565,29 +1628,29 @@ function delTenancyRecord(id){
 }
 
 function downloadTenancyHTML(){
-  const uid2=v('th-unit');if(!uid2){toast('Select a unit first.','error');return}
-  const u=gUnits().find(x=>x.id===uid2);
-  const list=thListFor(uid2);
+  const no=v('th-unit');if(!no){toast('Select a unit first.','error');return}
+  const p=thPrimary(no);if(!p)return;
+  const recs=thUnitsFor(no),list=thListFor(no);
   const cur$=gSettings().cur||'RM';
   const rows=list.map((t,i)=>`<tr>
     <td>${i+1}</td><td><b>${esc(t.tenant)}</b>${t.current?' <span style="color:#27ae60;font-size:9px">(current)</span>':''}</td>
-    <td>${thFmt(t.start)}</td><td>${t.end?thFmt(t.end):'ongoing'}</td><td>${thDur(t.start,t.end)}</td>
+    <td>${t.start?thFmt(t.start):'not set'}</td><td>${t.end?thFmt(t.end):'ongoing'}</td><td>${thDur(t.start,t.end)}</td>
     <td style="text-align:right">${t.rent?cur$+' '+(+t.rent).toFixed(2):'—'}</td><td>${esc(t.note||'')}</td></tr>`).join('');
-  const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Tenancy History — ${esc(u.no)}</title>
+  const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Tenancy History — ${esc(p.no)}</title>
   <style>body{font-family:Arial,sans-serif;font-size:12px;margin:24px;color:#222}
   h2{margin:0 0 4px;font-size:18px;color:#1a1a2e}.sub{color:#666;font-size:11px;margin-bottom:16px}
   table{width:100%;border-collapse:collapse;font-size:11px;margin-top:18px}
   th{background:#1a1a2e;color:#fff;padding:6px 8px;text-align:left}
   td{padding:5px 8px;border-bottom:1px solid #e0e0e0}</style></head><body>
-  <h2>Tenancy History — ${esc(u.no)}</h2>
-  <div class="sub">${esc(u.bld||'')} &nbsp;|&nbsp; Printed: ${new Date().toLocaleString('en-MY',{timeZone:'Asia/Kuala_Lumpur'})}</div>
+  <h2>Tenancy History — ${esc(p.no)}</h2>
+  <div class="sub">${esc(p.bld||'')}${recs.length>1?' &nbsp;|&nbsp; combined from '+recs.length+' unit records':''} &nbsp;|&nbsp; Printed: ${new Date().toLocaleString('en-MY',{timeZone:'Asia/Kuala_Lumpur'})}</div>
   ${thChartSVG(list)}
   <table><thead><tr><th>#</th><th>Tenant</th><th>From</th><th>To</th><th>Duration</th><th style="text-align:right">Rent</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table>
   </body></html>`;
   const blob=new Blob([html],{type:'text/html'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
-  a.href=url;a.download='Tenancy_'+(u.no||'unit').replace(/[^\w]/g,'_')+'.html';
+  a.href=url;a.download='Tenancy_'+(p.no||'unit').replace(/[^\w]/g,'_')+'.html';
   document.body.appendChild(a);a.click();document.body.removeChild(a);
   URL.revokeObjectURL(url);
   toast('Downloaded!','success');
