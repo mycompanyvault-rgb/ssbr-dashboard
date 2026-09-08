@@ -1401,8 +1401,11 @@ function thListFor(no){
   gTenancy().forEach(t=>{if(thKey(t.unitNo)===k||ids.includes(t.unitId))raw.push({...t,src:'history'})});
   recs.forEach(u=>{
     const tn=(u.ten||'').trim();
-    if(tn&&tn!=='-')raw.push({id:'__u_'+u.id,unitId:u.id,unitNo:u.no,tenant:tn,start:u.rentstart||'',
-      end:u.rentend||'',rent:+u.rent||0,ownerRent:+u.ownerRent||0,note:'',src:'unit'});
+    const named=!!(tn&&tn!=='-');
+    // a record with neither a name nor any date carries no information
+    if(!named&&!u.rentstart&&!u.rentend)return;
+    raw.push({id:'__u_'+u.id,unitId:u.id,unitNo:u.no,tenant:named?tn:'(no tenant name)',unnamed:!named,
+      start:u.rentstart||'',end:u.rentend||'',rent:+u.rent||0,ownerRent:+u.ownerRent||0,note:'',src:'unit'});
   });
   // chronological; an unknown start predates anything dated
   raw.sort((a,b)=>(a.start||'0000-00-00').localeCompare(b.start||'0000-00-00'));
@@ -1412,7 +1415,7 @@ function thListFor(no){
   raw.forEach(t=>{
     const p=out[out.length-1];
     let join=false;
-    if(p&&p.tenant.trim().toLowerCase()===t.tenant.trim().toLowerCase()){
+    if(p&&!p.unnamed&&!t.unnamed&&p.tenant.trim().toLowerCase()===t.tenant.trim().toLowerCase()){
       if(!p.end)join=true;
       else{const pe=thParse(p.end),ts=thParse(t.start);join=!ts||!pe||((ts-pe)/86400000)<=40}
     }
@@ -1457,7 +1460,7 @@ function renderTenancy(){
   const list=thListFor(no);
   document.getElementById('th-title').innerHTML='Tenancy History — '+esc(p.no)+' <span style="font-weight:400;color:var(--muted);font-size:.85rem">('+esc(p.bld||'')+(recs.length>1?' · combined from '+recs.length+' unit records':'')+')</span>';
 
-  const names=[...new Set(list.map(t=>t.tenant))];
+  const names=[...new Set(list.filter(t=>!t.unnamed).map(t=>t.tenant))];
   const cur=list.find(t=>t.current);
   let longest=null;
   list.forEach(t=>{const s=thParse(t.start);if(!s)return;const e=thParse(t.end)||new Date();const d=e-s;if(!longest||d>longest.d)longest={d,t}});
@@ -1475,7 +1478,7 @@ function renderTenancy(){
   const cur$=gSettings().cur||'RM';
   document.getElementById('th-body').innerHTML=list.length?list.map((t,i)=>`<tr${t.current?' style="background:#f0fff4"':''}>
       <td>${i+1}</td>
-      <td><div style="font-weight:600">${esc(t.tenant)}</div>
+      <td><div style="font-weight:600${t.unnamed?';color:var(--muted);font-style:italic':''}">${esc(t.tenant)}</div>
         ${t.current?'<span class="badge badge-green" style="font-size:.65rem">Current</span> ':''}
         ${t.future?'<span class="badge" style="background:#8e44ad;color:#fff;font-size:.65rem">Upcoming</span> ':''}
         ${t.parts>1?'<span class="badge" style="background:#eee;color:#666;font-size:.62rem">merged from '+t.parts+'</span>':''}</td>
@@ -1491,33 +1494,70 @@ function renderTenancy(){
     :'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No named tenant on record for this unit. Click "+ Add Past Tenancy" to record one.</td></tr>';
 }
 
+// Fallback diagram for a unit with no dates anywhere: show who the tenants are,
+// with NO time axis, because there is no date information to place them against.
+function thSequenceSVG(list){
+  const W=1000,padL=10,padR=10,IW=W-padL-padR;
+  const stripY=36,stripH=30,rowH=34,rowsY=stripY+stripH+22;
+  const H=rowsY+list.length*rowH+4;
+  const named=[...new Set(list.filter(t=>!t.unnamed).map(t=>t.tenant))];
+  const colorOf=t=>t.unnamed?'#95a5a6':TH_COLORS[named.indexOf(t.tenant)%TH_COLORS.length];
+  const fit=(s,px,fs)=>{const max=Math.floor(px/(fs*0.56));return s.length>max?s.slice(0,Math.max(1,max-1))+'…':s};
+  const segW=IW/list.length;
+  let s='';
+  s+=`<text x="${padL}" y="13" font-size="10.5" fill="#b9770e" font-family="Arial,sans-serif">No rental dates recorded — tenants shown without a time scale.</text>`;
+  s+=`<text x="${padL}" y="${stripY-5}" font-size="10" fill="#666" font-weight="bold" font-family="Arial,sans-serif">OCCUPANCY</text>`;
+  s+=`<rect x="${padL}" y="${stripY}" width="${IW}" height="${stripH}" fill="#fafafa" stroke="#e0e0e0" rx="4"/>`;
+  list.forEach((t,i)=>{
+    const x=padL+i*segW,c=colorOf(t);
+    s+=`<rect x="${x.toFixed(1)}" y="${stripY}" width="${segW.toFixed(1)}" height="${stripH}" fill="${c}" opacity=".55" stroke="#fff" stroke-width="1"/>`;
+    if(segW>46)s+=`<text x="${(x+segW/2).toFixed(1)}" y="${stripY+stripH/2+3.8}" font-size="10" fill="#fff" font-weight="bold" text-anchor="middle" font-family="Arial,sans-serif">${esc(fit(t.tenant,segW-8,10))}</text>`;
+  });
+  list.forEach((t,i)=>{
+    const y=rowsY+i*rowH,x=padL+i*segW,c=colorOf(t);
+    s+=`<line x1="${padL}" y1="${y+22}" x2="${W-padR}" y2="${y+22}" stroke="#f0f0f0" stroke-width="1"/>`;
+    s+=`<rect x="${x.toFixed(1)}" y="${y}" width="${segW.toFixed(1)}" height="21" rx="4" fill="${c}" opacity=".35" stroke="${c}" stroke-width="1" stroke-dasharray="5,3"/>`;
+    const lbl=esc(fit(t.tenant,segW-14,10.5));
+    if(segW>105)s+=`<text x="${(x+7).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#555" font-weight="bold" font-family="Arial,sans-serif">${lbl}</text>`;
+    else s+=`<text x="${(x+segW+6).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#333" font-weight="bold" font-family="Arial,sans-serif">${esc(t.tenant)}</text>`;
+    s+=`<text x="${padL}" y="${y+31}" font-size="9.5" fill="#999" font-family="Arial,sans-serif">dates not recorded${t.parts>1?'  ·  merged from '+t.parts+' records':''}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;min-width:640px;height:auto;display:block" xmlns="http://www.w3.org/2000/svg">${s}</svg>`;
+}
+
 // Horizontal timeline: one continuous occupancy strip (tenants + vacancy gaps),
-// then one labelled bar per tenancy on the same time scale. A tenancy with no
-// recorded start is drawn running off the left edge rather than being invented.
+// then one labelled bar per tenancy on the same time scale. Nothing is invented:
+// a tenancy with no start runs off the left edge, and one with no dates at all is
+// drawn open at both ends and labelled as such.
 function thChartSVG(list){
-  const items=list.filter(t=>thParse(t.start)||thParse(t.end));
-  if(!items.length)return '<div class="alert alert-warning">No dates recorded yet — add a start or end date and the timeline will appear.</div>';
+  const dated=list.filter(t=>thParse(t.start)||thParse(t.end));
+  const dateless=list.filter(t=>!thParse(t.start)&&!thParse(t.end));
+  if(!dated.length){
+    if(!dateless.length)return '<div class="alert alert-warning">Nothing recorded for this unit yet.</div>';
+    return thSequenceSVG(dateless); // no dates at all — show tenants without a time axis
+  }
+  const rows=dated.concat(dateless);
   const now=Date.now();
   const times=[now];
-  items.forEach(t=>{const s=thParse(t.start),e=thParse(t.end);if(s)times.push(s.getTime());if(e)times.push(e.getTime())});
+  dated.forEach(t=>{const s=thParse(t.start),e=thParse(t.end);if(s)times.push(s.getTime());if(e)times.push(e.getTime())});
   let lo=Math.min(...times),hi=Math.max(...times);
   if(hi-lo<86400000*120){const mid=(hi+lo)/2;lo=mid-86400000*60;hi=mid+86400000*60}
-  const openAny=items.some(t=>!thParse(t.start));
-  if(openAny)lo-=(hi-lo)*0.28; // room for bars that run off the left edge
+  if(dated.some(t=>!thParse(t.start))||dateless.length)lo-=(hi-lo)*0.28; // room for bars open on the left
   const pad=(hi-lo)*0.02;
   const t0=lo-pad,t1=hi+pad,span=t1-t0;
 
   const W=1000,padL=10,padR=10,IW=W-padL-padR;
   const X=ms=>padL+((ms-t0)/span)*IW;
-  const openStartMs=t0+span*0.028; // where an unknown-start bar begins
+  const openStartMs=t0+span*0.028,openEndMs=t1-span*0.028;
   const stripY=48,stripH=30,rowH=38,rowsY=stripY+stripH+28;
-  const H=rowsY+items.length*rowH+6;
+  const H=rowsY+rows.length*rowH+6;
 
-  const names=[...new Set(items.map(t=>t.tenant))];
-  const colorOf=n=>TH_COLORS[names.indexOf(n)%TH_COLORS.length];
+  const named=[...new Set(rows.filter(t=>!t.unnamed).map(t=>t.tenant))];
+  const colorOf=t=>t.unnamed?'#95a5a6':TH_COLORS[named.indexOf(t.tenant)%TH_COLORS.length];
   const fit=(s,px,fs)=>{const max=Math.floor(px/(fs*0.56));return s.length>max?s.slice(0,Math.max(1,max-1))+'…':s};
   const spanOf=t=>{const s=thParse(t.start),e=thParse(t.end);
-    return{a:s?s.getTime():openStartMs,b:e?e.getTime():now,openL:!s,openR:!e}};
+    if(!s&&!e)return{a:openStartMs,b:openEndMs,openL:true,openR:true,noDates:true};
+    return{a:s?s.getTime():openStartMs,b:e?e.getTime():now,openL:!s,openR:!e,noDates:false}};
 
   const yrs=span/(365.25*86400000);
   const step=yrs>8?24:yrs>4?12:yrs>2?6:yrs>1?3:1;
@@ -1531,9 +1571,9 @@ function thChartSVG(list){
     s+=`<line x1="${x.toFixed(1)}" y1="28" x2="${x.toFixed(1)}" y2="${H-4}" stroke="#e8e8e8" stroke-width="1"/>`;
     s+=`<text x="${x.toFixed(1)}" y="20" font-size="10.5" fill="#888" text-anchor="middle" font-family="Arial,sans-serif">${tickLbl(d)}</text>`;});
 
-  // occupancy strip
+  // occupancy strip — only tenancies that actually sit somewhere in time
   let segs=[],maxEnd=null;
-  items.forEach(t=>{const{a,b}=spanOf(t);
+  dated.forEach(t=>{const{a,b}=spanOf(t);
     if(maxEnd!==null&&a-maxEnd>86400000*3)segs.push({vacant:true,s:maxEnd,e:a});
     segs.push({vacant:false,s:a,e:b,t});
     maxEnd=maxEnd===null?b:Math.max(maxEnd,b)});
@@ -1544,7 +1584,7 @@ function thChartSVG(list){
       s+=`<rect x="${x.toFixed(1)}" y="${stripY}" width="${w.toFixed(1)}" height="${stripH}" fill="url(#thHatch)" stroke="#ddd"/>`;
       if(w>52)s+=`<text x="${(x+w/2).toFixed(1)}" y="${stripY+stripH/2+3.5}" font-size="9.5" fill="#999" text-anchor="middle" font-family="Arial,sans-serif">vacant</text>`;
     }else{
-      const c=colorOf(g.t.tenant);
+      const c=colorOf(g.t);
       s+=`<rect x="${x.toFixed(1)}" y="${stripY}" width="${w.toFixed(1)}" height="${stripH}" fill="${c}" opacity=".92"/>`;
       if(w>46)s+=`<text x="${(x+w/2).toFixed(1)}" y="${stripY+stripH/2+3.8}" font-size="10" fill="#fff" font-weight="bold" text-anchor="middle" font-family="Arial,sans-serif">${esc(fit(g.t.tenant,w-8,10))}</text>`;
     }
@@ -1552,24 +1592,29 @@ function thChartSVG(list){
   s+=`<text x="${padL}" y="${stripY-6}" font-size="10" fill="#666" font-weight="bold" font-family="Arial,sans-serif">OCCUPANCY</text>`;
 
   // one row per tenancy
-  items.forEach((t,i)=>{
+  rows.forEach((t,i)=>{
     const y=rowsY+i*rowH;
-    const{a,b,openL,openR}=spanOf(t);
-    const x=X(a),w=Math.max(3,X(b)-X(a)),c=colorOf(t.tenant);
+    const{a,b,openL,openR,noDates}=spanOf(t);
+    const x=X(a),w=Math.max(3,X(b)-X(a)),c=colorOf(t);
     s+=`<line x1="${padL}" y1="${y+22}" x2="${W-padR}" y2="${y+22}" stroke="#f0f0f0" stroke-width="1"/>`;
-    s+=`<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="21" rx="4" fill="${c}" opacity=".9"/>`;
-    if(openR)s+=`<polygon points="${(x+w).toFixed(1)},${y} ${(x+w+7).toFixed(1)},${(y+10.5).toFixed(1)} ${(x+w).toFixed(1)},${y+21}" fill="${c}" opacity=".9"/>`;
-    if(openL)s+=`<polygon points="${x.toFixed(1)},${y} ${(x-7).toFixed(1)},${(y+10.5).toFixed(1)} ${x.toFixed(1)},${y+21}" fill="${c}" opacity=".55"/>`;
-    const label=t.tenant+(t.current?'  ●':'');
-    if(w>105){s+=`<text x="${(x+7).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#fff" font-weight="bold" font-family="Arial,sans-serif">${esc(fit(label,w-14,10.5))}</text>`}
+    s+=`<rect x="${x.toFixed(1)}" y="${y}" width="${w.toFixed(1)}" height="21" rx="4" fill="${c}" opacity="${noDates?'.35':'.9'}"${noDates?' stroke="'+c+'" stroke-width="1" stroke-dasharray="5,3"':''}/>`;
+    if(openR)s+=`<polygon points="${(x+w).toFixed(1)},${y} ${(x+w+7).toFixed(1)},${(y+10.5).toFixed(1)} ${(x+w).toFixed(1)},${y+21}" fill="${c}" opacity="${noDates?'.35':'.9'}"/>`;
+    if(openL)s+=`<polygon points="${x.toFixed(1)},${y} ${(x-7).toFixed(1)},${(y+10.5).toFixed(1)} ${x.toFixed(1)},${y+21}" fill="${c}" opacity="${noDates?'.3':'.55'}"/>`;
+    const label=t.tenant+(t.current&&!noDates?'  ●':'');
+    if(w>105){s+=`<text x="${(x+7).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="${noDates?'#555':'#fff'}" font-weight="bold" font-family="Arial,sans-serif">${esc(fit(label,w-14,10.5))}</text>`}
     else{
       const right=x+w+(openR?13:6);
       const useLeft=right+label.length*6>W-padR;
-      s+=`<text x="${(useLeft?x-(openL?13:6):right).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#333" font-weight="bold" text-anchor="${useLeft?'end':'start'}" font-family="Arial,sans-serif">${esc(label)}</text>`;
+      s+=`<text x="${Math.max(padL,(useLeft?x-(openL?13:6):right)).toFixed(1)}" y="${y+14.5}" font-size="10.5" fill="#333" font-weight="bold" text-anchor="${useLeft?'end':'start'}" font-family="Arial,sans-serif">${esc(label)}</text>`;
     }
-    const from=t.start?thFmt(t.start):'start not recorded';
-    const dur=thDur(t.start,t.end);
-    const sub=from+' → '+(t.end?thFmt(t.end):'ongoing')+(dur!=='—'?'  ·  '+dur:'')+(t.parts>1?'  ·  merged from '+t.parts+' records':'');
+    let sub;
+    if(noDates)sub='dates not recorded';
+    else{
+      const from=t.start?thFmt(t.start):'start not recorded';
+      const dur=thDur(t.start,t.end);
+      sub=from+' → '+(t.end?thFmt(t.end):'ongoing')+(dur!=='—'?'  ·  '+dur:'');
+    }
+    if(t.parts>1)sub+='  ·  merged from '+t.parts+' records';
     s+=`<text x="${padL}" y="${y+32}" font-size="9.5" fill="#999" font-family="Arial,sans-serif">${esc(sub)}</text>`;
   });
 
