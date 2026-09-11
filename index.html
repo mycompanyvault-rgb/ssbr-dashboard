@@ -166,6 +166,12 @@ table.tbl{width:100%;border-collapse:collapse;font-size:.82rem}
 /* Owner Invoice tx cards */
 .oi-tx-card{background:#f7f8fc;border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px}
 .oi-tx-card:focus-within{border-color:var(--accent)}
+.oi-grip{cursor:grab;color:#b0b4bd;font-size:.95rem;line-height:1;user-select:none;text-align:center;padding-bottom:6px}
+.oi-grip:hover{color:var(--accent)}
+.oi-grip:active{cursor:grabbing}
+.oi-tx-card.oi-dragging{opacity:.4}
+.oi-tx-card.oi-drop-before{box-shadow:0 -3px 0 0 var(--accent)}
+.oi-tx-card.oi-drop-after{box-shadow:0 3px 0 0 var(--accent)}
 /* Statement of Account document */
 .stmt-doc{background:#fff;width:210mm;min-height:297mm;padding:12mm 15mm 14mm;margin:0 auto;box-shadow:0 4px 20px rgba(0,0,0,.15);font-family:Arial,Helvetica,sans-serif;font-size:9.5pt;color:#000;display:flex;flex-direction:column}
 .stmt-co-name{text-align:center;font-size:20pt;font-weight:bold;font-style:italic;letter-spacing:1px;line-height:1.2;margin-bottom:2px}
@@ -807,8 +813,8 @@ table.stmt-t-aging td{border:1px solid #000;padding:3px 6px;text-align:center;wi
                 <button class="btn btn-outline btn-sm" onclick="addOwnerInvBlankTx()">+ Blank</button>
               </div>
             </div>
-            <div style="display:grid;grid-template-columns:100px 100px 110px 110px 1fr 30px;gap:5px;padding:0 10px;margin-bottom:4px;font-size:.68rem;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.3px">
-              <span>Date DD/MM/YY</span><span>Ref No</span><span>Debit (RM)</span><span>Credit (RM)</span><span>Description</span><span></span>
+            <div style="display:grid;grid-template-columns:16px 100px 100px 110px 110px 1fr 30px;gap:5px;padding:0 10px;margin-bottom:4px;font-size:.68rem;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.3px">
+              <span></span><span>Date DD/MM/YY</span><span>Ref No</span><span>Debit (RM)</span><span>Credit (RM)</span><span>Description</span><span></span>
             </div>
             <div id="oi-tx-list"></div>
 
@@ -829,8 +835,8 @@ table.stmt-t-aging td{border:1px solid #000;padding:3px 6px;text-align:center;wi
                   <div class="fg"><label>Opening Balance Amount (RM)</label><input id="oi-util-openbal" type="number" step="0.01" value="0" placeholder="0.00" style="border-color:#e6b800"/></div>
                 </div>
               </div>
-              <div style="display:grid;grid-template-columns:100px 100px 110px 110px 1fr 30px;gap:5px;padding:0 10px;margin-bottom:4px;font-size:.68rem;color:#7a5c00;font-weight:700;text-transform:uppercase;letter-spacing:.3px">
-                <span>Date DD/MM/YY</span><span>Ref No</span><span>Debit (RM)</span><span>Credit (RM)</span><span>Description</span><span></span>
+              <div style="display:grid;grid-template-columns:16px 100px 100px 110px 110px 1fr 30px;gap:5px;padding:0 10px;margin-bottom:4px;font-size:.68rem;color:#7a5c00;font-weight:700;text-transform:uppercase;letter-spacing:.3px">
+                <span></span><span>Date DD/MM/YY</span><span>Ref No</span><span>Debit (RM)</span><span>Credit (RM)</span><span>Description</span><span></span>
               </div>
               <div id="oi-util-tx-list"></div>
             </div>
@@ -4074,6 +4080,52 @@ function renderOwnerInv(){
   renderOwnerInvGenForm();
 }
 
+// ─── Drag-to-reorder for owner-invoice transaction rows ──────────────────────
+// A row is only draggable while the mouse is held on its grip, so the inputs
+// keep behaving normally (text selection, caret placement).
+let _oiDrag=null;
+const oiDragArr=kind=>kind==='util'?_oiUtilTx:_oiTx;
+const oiDragRender=kind=>kind==='util'?renderOiUtilTxList():renderOiTxList();
+function oiGripDown(el){const c=el.closest('.oi-tx-card');if(c)c.draggable=true}
+function oiGripUp(el){const c=el.closest('.oi-tx-card');if(c)c.draggable=false}
+function oiDragStart(ev,kind,i){
+  _oiDrag={kind,from:i};
+  try{ev.dataTransfer.effectAllowed='move';ev.dataTransfer.setData('text/plain',String(i))}catch(e){}
+  const card=ev.currentTarget;setTimeout(()=>card.classList.add('oi-dragging'),0);
+}
+const oiDropAfter=(ev,card)=>{const r=card.getBoundingClientRect();return(ev.clientY-r.top)>r.height/2};
+function oiDragOver(ev,kind){
+  if(!_oiDrag||_oiDrag.kind!==kind)return;
+  ev.preventDefault();
+  try{ev.dataTransfer.dropEffect='move'}catch(e){}
+  const card=ev.currentTarget,after=oiDropAfter(ev,card);
+  card.classList.toggle('oi-drop-before',!after);
+  card.classList.toggle('oi-drop-after',after);
+}
+function oiDragLeave(ev){ev.currentTarget.classList.remove('oi-drop-before','oi-drop-after')}
+function oiDrop(ev,kind,i){
+  if(!_oiDrag||_oiDrag.kind!==kind)return;
+  ev.preventDefault();
+  const card=ev.currentTarget,after=oiDropAfter(ev,card);
+  card.classList.remove('oi-drop-before','oi-drop-after');
+  const arr=oiDragArr(kind),from=_oiDrag.from;
+  _oiDrag=null;
+  let to=i+(after?1:0);
+  if(from<to)to--;
+  if(from<0||from>=arr.length||to===from){oiDragRender(kind);return}
+  const[moved]=arr.splice(from,1);
+  arr.splice(Math.max(0,Math.min(to,arr.length)),0,moved);
+  oiDragRender(kind);
+  toast('Row moved — remember to Save.','success');
+}
+function oiDragEnd(){
+  _oiDrag=null;
+  document.querySelectorAll('.oi-tx-card').forEach(el=>{
+    el.draggable=false;
+    el.classList.remove('oi-dragging','oi-drop-before','oi-drop-after');
+  });
+}
+
 function renderOiTxList(){
   const list=document.getElementById('oi-tx-list');
   if(!_oiTx.length){
@@ -4081,8 +4133,9 @@ function renderOiTxList(){
     return;
   }
   list.innerHTML=_oiTx.map((tx,i)=>`
-    <div class="oi-tx-card">
-      <div style="display:grid;grid-template-columns:100px 100px 110px 110px 1fr 30px;gap:5px;align-items:end;margin-bottom:5px">
+    <div class="oi-tx-card" ondragstart="oiDragStart(event,'tx',${i})" ondragover="oiDragOver(event,'tx')" ondragleave="oiDragLeave(event)" ondrop="oiDrop(event,'tx',${i})" ondragend="oiDragEnd()">
+      <div style="display:grid;grid-template-columns:16px 100px 100px 110px 110px 1fr 30px;gap:5px;align-items:end;margin-bottom:5px">
+        <span class="oi-grip" title="Drag to reorder" onmousedown="oiGripDown(this)" onmouseup="oiGripUp(this)">⠿</span>
         <input class="bi" value="${esc(tx.date||'')}" placeholder="DD/MM/YY" oninput="_oiTx[${i}].date=this.value" title="Date"/>
         <input class="bi" value="${esc(tx.ref||'')}" placeholder="Ref No" oninput="_oiTx[${i}].ref=this.value" title="Ref No"/>
         <input class="bi" type="number" step="0.01" min="0" value="${tx.debit||''}" placeholder="0.00" oninput="_oiTx[${i}].debit=parseFloat(this.value)||0" title="Debit (RM)"/>
@@ -4124,8 +4177,9 @@ function renderOiUtilTxList(){
     return;
   }
   list.innerHTML=_oiUtilTx.map((tx,i)=>`
-    <div class="oi-tx-card" style="background:#fffde7;border-color:#e6b800">
-      <div style="display:grid;grid-template-columns:100px 100px 110px 110px 1fr 30px;gap:5px;align-items:end;margin-bottom:5px">
+    <div class="oi-tx-card" style="background:#fffde7;border-color:#e6b800" ondragstart="oiDragStart(event,'util',${i})" ondragover="oiDragOver(event,'util')" ondragleave="oiDragLeave(event)" ondrop="oiDrop(event,'util',${i})" ondragend="oiDragEnd()">
+      <div style="display:grid;grid-template-columns:16px 100px 100px 110px 110px 1fr 30px;gap:5px;align-items:end;margin-bottom:5px">
+        <span class="oi-grip" style="color:#c9a227" title="Drag to reorder" onmousedown="oiGripDown(this)" onmouseup="oiGripUp(this)">⠿</span>
         <input class="bi" value="${esc(tx.date||'')}" placeholder="DD/MM/YY" oninput="_oiUtilTx[${i}].date=this.value" title="Date"/>
         <input class="bi" value="${esc(tx.ref||'')}" placeholder="Ref No" oninput="_oiUtilTx[${i}].ref=this.value" title="Ref No"/>
         <input class="bi" type="number" step="0.01" min="0" value="${tx.debit||''}" placeholder="0.00" oninput="_oiUtilTx[${i}].debit=parseFloat(this.value)||0" title="Debit (RM)"/>
