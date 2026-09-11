@@ -777,6 +777,9 @@ table.stmt-t-aging td{border:1px solid #000;padding:3px 6px;text-align:center;wi
               <datalist id="oi-unit-dl"></datalist>
             </div>
             <button class="btn btn-success btn-sm" onclick="saveOwnerInv()">💾 Save</button>
+            <button class="btn btn-outline btn-sm" onclick="renameOwnerInv()" title="Rename this entry, keeping every transaction">✏️ Rename</button>
+            <button class="btn btn-outline btn-sm" onclick="copyOwnerInv()" title="Copy all of this data to a new name">⧉ Copy to…</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteOwnerInv()" title="Delete this entry and all its transactions">🗑</button>
             <button class="btn btn-info btn-sm" onclick="show('ownerstmt')">📊 View Statement</button>
           </div>
         </div>
@@ -4035,10 +4038,73 @@ let _oiUnitId='';
 let _oiTx=[];
 let _oiUtilTx=[];
 
+// Saved owner-invoice entries first (those hold data), then the rental units.
+function oiUnitOptions(units){
+  const seen=new Set(),out=[];
+  const add=o=>{const k=(o||'').trim();if(!k)return;const lc=k.toLowerCase();if(seen.has(lc))return;seen.add(lc);out.push(k)};
+  Object.keys(gOwnerInv()).forEach(add);
+  (units||gUnits()).forEach(u=>add(u.no+(u.bld?' — '+u.bld:'')));
+  return out;
+}
+
+// Move an entry (and all its transactions) to a different name.
+function renameOwnerInv(){
+  const cur=(document.getElementById('oi-unit-sel').value||'').trim();
+  if(!cur){toast('Enter or select a unit first.','error');return;}
+  const next=(prompt('Rename "'+cur+'" to:',cur)||'').trim();
+  if(!next||next===cur)return;
+  const all=gOwnerInv();
+  if(all[next]&&!confirm('"'+next+'" already has saved data.\n\nOverwrite it with "'+cur+'"?'))return;
+  saveOwnerInv(true); // keep whatever is on screen before moving it
+  const data=gOwnerInv();
+  data[next]={...(data[cur]||{}),unitLabel:next};
+  delete data[cur];
+  DB.set('owner_inv',data);
+  _oiUnitId=next;
+  document.getElementById('oi-unit-sel').value=next;
+  initOwnerInv();
+  toast('Renamed "'+cur+'" → "'+next+'".','success');
+}
+
+// Duplicate an entry under a new name, leaving the original untouched.
+function copyOwnerInv(){
+  const cur=(document.getElementById('oi-unit-sel').value||'').trim();
+  if(!cur){toast('Enter or select a unit first.','error');return;}
+  const next=(prompt('Copy "'+cur+'" to a new name:',cur+' (copy)')||'').trim();
+  if(!next||next===cur)return;
+  const all=gOwnerInv();
+  if(all[next]&&!confirm('"'+next+'" already has saved data.\n\nOverwrite it with a copy of "'+cur+'"?'))return;
+  saveOwnerInv(true);
+  const data=gOwnerInv();
+  data[next]=JSON.parse(JSON.stringify({...(data[cur]||{}),unitLabel:next}));
+  DB.set('owner_inv',data);
+  _oiUnitId=next;
+  document.getElementById('oi-unit-sel').value=next;
+  initOwnerInv();
+  toast('Copied "'+cur+'" → "'+next+'".','success');
+}
+
+// Remove an entry outright — used to clear out stray/duplicate names.
+function deleteOwnerInv(){
+  const cur=(document.getElementById('oi-unit-sel').value||'').trim();
+  if(!cur){toast('Enter or select a unit first.','error');return;}
+  const all=gOwnerInv();
+  const d=all[cur];
+  if(!d){toast('"'+cur+'" has nothing saved to delete.','error');return;}
+  const nTx=(d.transactions||[]).length+(d.utilTransactions||[]).length;
+  if(!confirm('Delete "'+cur+'" and its '+nTx+' transaction(s)? This cannot be undone.'))return;
+  delete all[cur];
+  DB.set('owner_inv',all);
+  _oiUnitId='';
+  document.getElementById('oi-unit-sel').value='';
+  initOwnerInv();
+  toast('Deleted "'+cur+'".','success');
+}
+
 function initOwnerInv(){
   const units=gUnits();
   const dl=document.getElementById('oi-unit-dl');
-  if(dl)dl.innerHTML=units.map(u=>`<option value="${esc(u.no)}${u.bld?' — '+esc(u.bld):''}">`).join('');
+  if(dl)dl.innerHTML=oiUnitOptions(units).map(o=>`<option value="${esc(o)}">`).join('');
   // Restore previously typed/selected value
   const inp=document.getElementById('oi-unit-sel');
   if(_oiUnitId&&inp&&!inp.value)inp.value=_oiUnitId;
@@ -4211,9 +4277,9 @@ function removeOwnerInvUtilTx(i){
   renderOiUtilTxList();
 }
 
-function saveOwnerInv(){
+function saveOwnerInv(quiet){
   const key=(document.getElementById('oi-unit-sel').value||'').trim();
-  if(!key){toast('Please enter or select a unit name first.','error');return;}
+  if(!key){if(!quiet)toast('Please enter or select a unit name first.','error');return;}
   _oiUnitId=key;
   const allData=gOwnerInv();
   allData[key]={
@@ -4230,7 +4296,7 @@ function saveOwnerInv(){
     utilTransactions:_oiUtilTx.map(t=>({...t})),
   };
   DB.set('owner_inv',allData);
-  toast('Owner invoice saved for "'+key+'"!','success');
+  if(!quiet)toast('Owner invoice saved for "'+key+'"!','success');
 }
 
 // ─── Owner Invoice — Split PDF Generator ─────────────────────────────────────
