@@ -4356,7 +4356,7 @@ function renderOwnerStmt(){
     txRowsHTML+=`<tr><td>&nbsp;</td><td></td><td></td><td class="num"></td><td class="num"></td><td class="num"></td></tr>`;
   }
   // Aging
-  const aging=osCalcAging(stmtDateISO,txList);
+  const aging=osCalcAging(stmtDateISO,txList,openBal,openBalDate);
   const row1=aging.slice(0,6);
   const row2=aging.slice(6,12);
   function agingCell(m){const v=m.net;if(!isFinite(v)||v===0)return`<td>&nbsp;-&nbsp;</td>`;return`<td>${v.toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>`;}
@@ -4415,7 +4415,7 @@ function renderOwnerStmt(){
 function osFmt(val){const n=parseFloat(val);if(!isFinite(n)||n===0)return'';return n.toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function osFmtForce(val){const n=parseFloat(val)||0;return n.toLocaleString('en-MY',{minimumFractionDigits:2,maximumFractionDigits:2});}
 
-function osCalcAging(stmtDateISO,txList){
+function osCalcAging(stmtDateISO,txList,openBal,openBalDate){
   if(!stmtDateISO)return[];
   const sd=new Date(stmtDateISO+'T00:00:00');
   if(isNaN(sd))return[];
@@ -4428,20 +4428,51 @@ function osCalcAging(stmtDateISO,txList){
   }
   function parseTxDateStr(str){
     if(!str)return null;
-    const p=str.trim().split('/');
+    const p=String(str).trim().split('/');
     if(p.length!==3)return null;
     let[dd,mm,yy]=p.map(s=>s.trim());
     if(yy.length===2)yy='20'+yy;
     const dt=new Date(+yy,+mm-1,+dd);
-    return isNaN(dt)?null:dt;
+    return isNaN(dt.getTime())?null:dt;
   }
-  txList.forEach(tx=>{
-    const txDate=parseTxDateStr(tx.date);
-    if(!txDate)return;
-    const idx=buckets.findIndex(b=>b.year===txDate.getFullYear()&&b.month===txDate.getMonth());
-    const target=idx!==-1?buckets[idx]:buckets[11];
-    target.net+=(parseFloat(tx.debit)||0)-(parseFloat(tx.credit)||0);
+  // Work in cents so the buckets always add back to the closing balance exactly.
+  const cents=v=>Math.round((parseFloat(v)||0)*100);
+
+  const debits=[];let creditPool=0;
+  const ob=cents(openBal);
+  const obDate=parseTxDateStr(openBalDate)||new Date(sd.getFullYear(),sd.getMonth()-11,1);
+  if(ob>0)debits.push({date:obDate,seq:-1,left:ob});
+  else if(ob<0)creditPool+=-ob;
+  (txList||[]).forEach((tx,i)=>{
+    // An unparseable date must not drop the amount, or the ageing stops
+    // reconciling to the ledger — age it as oldest-unknown instead.
+    const dt=parseTxDateStr(tx.date)||new Date(0);
+    const dr=cents(tx.debit),cr=cents(tx.credit);
+    if(dr>0)debits.push({date:dt,seq:i,left:dr});
+    if(cr>0)creditPool+=cr;
   });
+
+  // Appropriate every credit against the OLDEST outstanding charge first, the way
+  // the ledger does. A payment must clear the debt it settles — not sit as a
+  // negative in whichever month it happened to be paid.
+  debits.sort((a,b)=>a.date-b.date||a.seq-b.seq);
+  for(const dbt of debits){
+    if(creditPool<=0)break;
+    const use=Math.min(creditPool,dbt.left);
+    dbt.left-=use;creditPool-=use;
+  }
+
+  // Whatever is still unpaid ages by the date of its own charge.
+  debits.forEach(dbt=>{
+    if(dbt.left<=0)return;
+    const idx=buckets.findIndex(b=>b.year===dbt.date.getFullYear()&&b.month===dbt.date.getMonth());
+    const target=idx!==-1?buckets[idx]:(dbt.date>sd?buckets[0]:buckets[11]);
+    target.net+=dbt.left/100;
+  });
+  // Credit left after every charge is cleared is a genuine advance; show it in the
+  // statement month so the row still totals the closing balance.
+  if(creditPool>0)buckets[0].net-=creditPool/100;
+
   return buckets;
 }
 
